@@ -137,11 +137,10 @@ def setup_auth(session):
     r = session.post(url, json=data)
     return r
 
-def get_auth_data(session):
-    r = setup_auth(session)
-    cookies = dict(r.cookies)
-    data = r.json()
-    if "error" in data: raise AuthException(data["error"])
+def get_auth_data(session, auth):
+    cookies = dict(auth.cookies)
+    data = auth.json()
+    if "error" in data: raise Exception(data["error"])
     uri = data["response"]["parameters"]["uri"]
     token = get_token(uri)
     return token, cookies
@@ -178,9 +177,9 @@ def get_user_info(session, token: Token) -> str:
 if __name__ == "__main__":
     user = User("username", "password")
     session = setup_session()
-    setup_auth(session)
+    auth = setup_auth(session)
     CaptchaFlow(session, user).captcha_flow()
-    token, cookies = get_auth_data(session)
+    token, cookies = get_auth_data(session, auth)
     entitlements_token = get_entitlement(session, token)
     user_id = get_user_info(session, token)
     print(user_id)
