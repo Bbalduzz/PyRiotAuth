@@ -1,3 +1,4 @@
+import contextlib
 from secrets import token_urlsafe
 from httpx import Client
 import requests
@@ -8,12 +9,10 @@ import capmonster_python
 import json
 
 def magic_decode(string: str):
-    try:
+    with contextlib.suppress(json.JSONDecodeError):
         return json.loads(string)
-    except json.JSONDecodeError: pass
-    try:
+    with contextlib.suppress(jwt.exceptions.DecodeError):
         return jwt.decode(string, options={"verify_signature": False})
-    except jwt.exceptions.DecodeError: pass
     raise DecodeException
 
 @dataclass
@@ -81,7 +80,6 @@ class CaptchaFlow:
         }
         url = "https://authenticate.riotgames.com/api/v1/login"
         response_data = self.ses.put(url, json=data).json()
-        print(response_data)
         return response_data["success"]["login_token"]
 
     def login_cookies(self, login_token: str):
@@ -94,12 +92,26 @@ class CaptchaFlow:
         url = "https://auth.riotgames.com/api/v1/login-token"
         self.ses.post(url, json=data)
 
-    def solve_captcha(self, data):
-       ''' captcha solver implementation. here it's used capmonster service '''
+    def solve_2captcha(self, data):
+        from twocaptcha import TwoCaptcha
         sitekey = data["captcha"]["hcaptcha"]["key"]
         rqdata = data["captcha"]["hcaptcha"]["data"]
-        print("solving captcha with:", sitekey, rqdata)
-        capmonster = capmonster_python.HCaptchaTask("<YOUR_API_KEY>") # api key
+        solver = TwoCaptcha("8238186e93d681302e1390b4874a6ed1")
+        try:
+            result = solver.hcaptcha(
+               sitekey=sitekey,
+               url='https://auth.riotgames.com/',
+               param1=rqdata
+            )
+            return json.loads(json.dumps(result))["code"]
+
+        except Exception as e:
+           print(e)
+
+    def solve_captcha(self, data):
+        sitekey = data["captcha"]["hcaptcha"]["key"]
+        rqdata = data["captcha"]["hcaptcha"]["data"]
+        capmonster = capmonster_python.HCaptchaTask("<YOUR_API_TOKEN>") # api key
         capmonster.set_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.82 Safari/537.36")
         task_id = capmonster.create_task(website_url="https://auth.riotgames.com", website_key=sitekey, custom_data=rqdata)
         result = capmonster.join_task_result(task_id)
@@ -108,62 +120,70 @@ class CaptchaFlow:
     def captcha_flow(self):
         captcha_data = self.get_captcha_token()
         captcha_token = self.solve_captcha(captcha_data)
-        print(captcha_token)
         login_token = self.get_login_token(captcha_token)
         self.login_cookies(login_token)
 
-def setup_session():
-    app = "rso-auth"
-    session = Client()
-    session.headers.update({
-        "User-Agent": f'RiotClient/{version.riot} {app} (Windows;10;;Professional, x64)',
-        "Cache-Control": "no-cache",
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    })
-    session.cookies.update({"tdid": "", "asid": "", "did": "", "clid": ""})
-    return session
+class RiotAuth:
+    def __init__(self, user):
+        self.session = self.setup_session()
+        self.setup_auth(self.session)
+        CaptchaFlow(self.session, user).captcha_flow()
+        self.token, self.cookies = self.get_auth_data(self.session)
+        self.entitlements_token = self.get_entitlement(self.session, self.token)
 
-def setup_auth(session):
-    data = {
-        "client_id": "riot-client",
-        "nonce": token_urlsafe(16),
-        "redirect_uri": "http://localhost/redirect",
-        "response_type": "token id_token",
-        "scope": "account openid",
-    }
+    def setup_session(self):
+        app = "rso-auth"
+        session = Client()
+        session.headers.update({
+            "User-Agent": f'RiotClient/{version.riot} {app} (Windows;10;;Professional, x64)',
+            "Cache-Control": "no-cache",
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        })
+        session.cookies.update({"tdid": "", "asid": "", "did": "", "clid": ""})
+        return session
 
-    url = "https://auth.riotgames.com/api/v1/authorization"
-    r = session.post(url, json=data)
-    return r
+    def setup_auth(self, session):
+        data = {
+            "client_id": "riot-client",
+            "nonce": token_urlsafe(16),
+            "redirect_uri": "http://localhost/redirect",
+            "response_type": "token id_token",
+            "scope": "account openid",
+        }
 
-def get_auth_data(session, auth):
-    cookies = dict(auth.cookies)
-    data = auth.json()
-    if "error" in data: raise Exception(data["error"])
-    uri = data["response"]["parameters"]["uri"]
-    token = get_token(uri)
-    return token, cookies
+        url = "https://auth.riotgames.com/api/v1/authorization"
+        r = session.post(url, json=data)
+        return r
 
-def get_token(uri: str) -> Token:
-    access_token = uri.split("access_token=")[1].split("&scope")[0]
-    token_id = uri.split("id_token=")[1].split("&")[0]
-    expires_in = uri.split("expires_in=")[1].split("&")[0]
-    timestamp = time() + float(expires_in)
-    token = Token(access_token, token_id, timestamp)
-    return token
+    def get_auth_data(self, session):
+        r = self.setup_auth(session)
+        cookies = dict(r.cookies)
+        data = r.json()
+        if "error" in data: raise Exception(data["error"])
+        uri = data["response"]["parameters"]["uri"]
+        token = self.get_token(uri)
+        return token, cookies
 
-def get_entitlement(session, token: Token) -> str:
-    app = 'entitlements'
-    url = "https://entitlements.auth.riotgames.com/api/token/v1"
-    headers = {
-        "Accept-Encoding": "gzip, deflate, br",
-        "Authorization": f"Bearer {token.access_token}",
-        "User-Agent": f'RiotClient/{version.riot} {app} (Windows;10;;Professional, x64)',
-    }
-    r = session.post(url, headers=headers, json={})
-    data = magic_decode(r.text)
-    return data["entitlements_token"]
+    def get_token(self, uri: str) -> Token:
+        access_token = uri.split("access_token=")[1].split("&scope")[0]
+        token_id = uri.split("id_token=")[1].split("&")[0]
+        expires_in = uri.split("expires_in=")[1].split("&")[0]
+        timestamp = time() + float(expires_in)
+        token = Token(access_token, token_id, timestamp)
+        return token
+
+    def get_entitlement(self, session, token: Token) -> str:
+        app = 'entitlements'
+        url = "https://entitlements.auth.riotgames.com/api/token/v1"
+        headers = {
+            "Accept-Encoding": "gzip, deflate, br",
+            "Authorization": f"Bearer {token.access_token}",
+            "User-Agent": f'RiotClient/{version.riot} {app} (Windows;10;;Professional, x64)',
+        }
+        r = session.post(url, headers=headers, json={})
+        data = magic_decode(r.text)
+        return data["entitlements_token"]
 
 def get_user_info(session, token: Token) -> str:
     headers = {
@@ -176,11 +196,6 @@ def get_user_info(session, token: Token) -> str:
 
 if __name__ == "__main__":
     user = User("username", "password")
-    session = setup_session()
-    auth = setup_auth(session)
-    CaptchaFlow(session, user).captcha_flow()
-    token, cookies = get_auth_data(session, auth)
-    entitlements_token = get_entitlement(session, token)
-    user_id = get_user_info(session, token)
-    print(user_id)
-    session.close()
+    client = RiotAuth(user)
+    user = get_user_info(client.session, client.token)
+    print(user)
