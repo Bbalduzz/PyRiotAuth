@@ -96,7 +96,7 @@ class CaptchaFlow:
         from twocaptcha import TwoCaptcha
         sitekey = data["captcha"]["hcaptcha"]["key"]
         rqdata = data["captcha"]["hcaptcha"]["data"]
-        solver = TwoCaptcha("8238186e93d681302e1390b4874a6ed1")
+        solver = TwoCaptcha("<YOUR_API_TOKEN>")
         try:
             result = solver.hcaptcha(
                sitekey=sitekey,
